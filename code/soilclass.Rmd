@@ -1,0 +1,198 @@
+---
+title: "soilclass"
+author: "LC"
+date: "13 de julho de 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r Comments}
+### This script works for categorical (discrete) data only ###
+```
+
+```{r Load Packages}
+library(sp)
+library(raster)
+library(caret)
+library(snow)
+library(randomForest)
+```
+
+```{r Auxiliar functions}
+# Shannon Entropy
+entropy <-
+  function (x) {
+    - sum(x * log(x, base = length(x)), na.rm = TRUE)
+  }
+
+# Confusion index
+confusion <-
+  function (x) {
+    1 - diff(sort(x, decreasing = TRUE)[2:1])
+  }
+```
+
+```{r Import data}
+
+# Import csv file containing point coordinates and target (response) variables
+
+data <- read.csv("C:/smclass/sm_predict2.csv", sep = ";")
+View(data)
+
+# Import all raster files of covariates
+
+ELEV <- raster("C:/smclass/covar/altitude.tif")
+NDVI <- raster("C:/smclass/covar/ndvi_fev.tif")
+TWI <- raster("C:/smclass/covar/twi.tif")
+
+ASP <- raster("C:/smclass/covar/aspect.tif")
+RSOM <- raster("C:/smclass/covar/relevo_somb.tif")
+AH <- raster("C:/smclass/covar/analit_hild.tif")
+FORT <- raster("C:/smclass/covar/cat_formasterr.tif")
+CA <- raster("C:/smclass/covar/catch_area.tif")
+CI <- raster("C:/smclass/covar/conv_index.tif")
+CSC <- raster("C:/smclass/covar/csc.tif")
+CV <- raster("C:/smclass/covar/curv_vert.tif")
+DECLI <- raster("C:/smclass/covar/declividade.tif")
+GC <- raster("C:/smclass/covar/general_curv.tif")
+LC <- raster("C:/smclass/covar/long_curv.tif")
+LSF <- raster("C:/smclass/covar/ls_factor.tif")
+NDVI <- raster("C:/smclass/covar/ndvi_fev.tif")
+ORI <- raster("C:/smclass/covar/orientacao.tif")
+CPLAN <- raster("C:/smclass/covar/plan_curv.tif")
+CPROF <- raster("C:/smclass/covar/profile_curv.tif")
+RSOM <- raster("C:/smclass/covar/relevo_somb.tif")
+TALV <- raster("C:/smclass/covar/talvegues.tif")
+CTAN <- raster("C:/smclass/covar/tang_curv.tif")
+TWI <- raster("C:/smclass/covar/twi.tif")
+
+# Extract covariates data to point observations (X and Y are the names of the columns)
+data$ELEV <- extract(ELEV, data[, c("X", "Y")])
+data$NDVI <- extract(NDVI, data[, c("X", "Y")])
+data$TWI <- extract(TWI, data[, c("X", "Y")])
+
+data$ASP <- extract(ASP, data[, c("X", "Y")])
+data$RSOM <- extract(RSOM, data[, c("X", "Y")])
+data$AH <- extract(AH, data[, c("X", "Y")])
+data$CA <- extract(CA, data[, c("X", "Y")])
+data$CI <- extract(CI, data[, c("X", "Y")])
+data$CSC <- extract(CSC, data[, c("X", "Y")])
+data$CV <- extract(CV, data[, c("X", "Y")])
+data$DECLI <- extract(DECLI, data[, c("X", "Y")])
+data$GC <- extract(GC, data[, c("X", "Y")])
+data$LC <- extract(LC, data[, c("X", "Y")])
+data$LSF <- extract(LSF, data[, c("X", "Y")])
+data$ORI <- extract(ORI, data[, c("X", "Y")])
+data$CPLAN <- extract(CPLAN, data[, c("X", "Y")])
+data$CPROF <- extract(CPROF, data[, c("X", "Y")])
+data$CTAN <- extract(CTAN, data[, c("X", "Y")])
+data$FORT <- extract(FORT, data[, c("X", "Y")])
+data$TALV <- extract(TALV, data[, c("X", "Y")])
+```
+
+```{r Split Datasets}
+#Split Datasets Randomly= Training 70% / Validation 30%
+set.seed(1987)
+indices = sample(1:nrow(data), size=0.3*nrow(data))
+train = data[-indices,]
+dim(data) 
+val = data[indices,]
+dim(val)
+
+View(train)
+```
+
+```{r Calibrate model}
+# Calibrate model
+form <- formula(paste("CLASSE", " ~ ", paste(colnames(train[,6:7]), collapse = " + ")))
+
+learner_fit <- train(
+  form = form, data = train, weights = train[["PESO"]], #weights= coluna contendo o valor de confiança
+  method = "rf", tuneLength = 1, #change method to use other models
+  na.action = na.omit, trControl = trainControl(method = "LOOCV")
+)
+
+# Perform validation
+pred <- predict(learner_fit, val)
+error <- confusionMatrix(data = pred, reference = val$CLASSEPF)
+error
+```
+
+```{r Spatial Prediction}
+# Make spatial predictions ----
+beginCluster()
+prediction <- 
+  clusterR(brick(ELEV, AH, ASP, FORT, CA, CI, CSC, CV, DECLI, GC, LC, LSF, NDVI, ORI, CPLAN, CPROF, RSOM, TALV, CTAN,), raster::predict, 
+           args = list(model = learner_fit, type = "prob", index = 1:nlevels(train$CLASSEPF)))
+endCluster()
+
+# Compute predictions and prediction uncertainty ----
+
+Predictions <- as.factor(calc(x = prediction, fun = nnet::which.is.max))
+rat <- levels(Predictions)[[1]]
+rat$class <- levels(data[["CLASSE"]])[rat$ID]
+levels(Predictions) <- rat
+Uncertainty <-
+  brick(
+    calc(x = prediction, fun = max),
+    calc(x = prediction, fun = entropy),
+    calc(x = prediction, fun = confusion)
+  )
+Metadata <- 
+  rbind(
+    c("Predictions", 
+      paste("Predicted class (", paste(apply(rat, 1, paste, collapse = "="), collapse = "; "), "); ",
+            "Observations = ", nrow(learner_fit$trainingData),
+            sep = "")),
+    c("Uncertainty", 
+      "Band 1 = Theoretical purity (0-1); Band 2 = Shannon entropy (0-1); Band 3 = Confusion index (0-1)"),
+    c("Statistical learner", 
+      paste(learner_fit$method[1], " = ", learner_fit$modelInfo$label[1], " (", learner_fit$modelType[1], ")", 
+            sep = "")),
+    c("Cross-validation", 
+      paste("Overall accuracy = ", round(learner_fit$results$Accuracy[nrow(learner_fit$results)], 4), "; ",
+            "Overall kappa = ", round(learner_fit$results$Kappa[nrow(learner_fit$results)], 4), 
+            sep = "")),
+    c("Covariate importance",
+      paste(rownames(varImp(learner_fit)[[1]])[order(varImp(learner_fit)[[1]], decreasing = TRUE)],
+            collapse = "; "))
+  )
+
+Metadata <- 
+  rbind(
+    Metadata,
+    c("Validation", 
+      paste("Overall accuracy = ", round(error$overall[["Accuracy"]], 4), "; ",
+            "Overall kappa = ", round(error$overall[["Kappa"]], 4), "; ",
+            "Observations = ", length(val),
+            sep = ""))
+  )
+
+colnames(Metadata) <- c("Item", "Description")
+```
+
+```{r Output}
+# Output
+Predictions
+Uncertainty
+Metadata
+
+# View maps
+plot(Predictions)
+plot(Uncertainty)
+
+# Export data
+
+writeRaster(Predictions, "F:/prediction_gateados/predictionCLASSE.tif", format="GTiff", overwrite=TRUE)
+
+writeRaster(Uncertainty, "F:/prediction_gateados/INCERTEZACLASSE.tif", options="INTERLEAVE=BAND", overwrite=TRUE)
+
+write(Metadata, "F:/prediction_gateados/CLASSE_metadata.txt")
+
+
+```
